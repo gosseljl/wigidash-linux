@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 wigi_linux
+.claude/
+*.egg-info/
+*.png

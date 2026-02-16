@@ -1,0 +1,13 @@
+[Unit]
+Description=WigiDash USB Display Monitor
+After=graphical.target
+Wants=graphical.target
+
+[Service]
+Type=simple
+ExecStart=/opt/wigidash/wigidash.py monitor
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical.target

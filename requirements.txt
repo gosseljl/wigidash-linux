@@ -1,0 +1,6 @@
+pyusb
+Pillow
+psutil
+numpy
+dbus-python
+PyGObject
