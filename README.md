@@ -91,3 +91,7 @@ sudo bash install.sh --uninstall  # Clean removal
 ## License
 
 This project is licensed under the GNU General Public License v3.0 — see the [LICENSE](LICENSE) file.
+
+## LLM Generated Project
+
+100% LLM Generated using Claude Opus 4.6.  This was an experiment in using an LLM to reverse engineer a hardware device to produce a working driver for that device.  It exceeded expectations, requiring the human to only be Claude's eyes and hands while Claude probed the hardware.  In any case I hope other windows refugees with a wigidash can find this useful.  Maybe even improve on it!
