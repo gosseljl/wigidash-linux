@@ -1159,10 +1159,13 @@ def cmd_monitor(args):
 
         DBusGMainLoop(set_as_default=True)
 
+        saved_brightness = [None]
+
         def on_prepare_for_sleep(going_to_sleep):
             if going_to_sleep:
                 print("\n  System suspending — display off")
                 try:
+                    saved_brightness[0] = wigi.get_brightness()
                     wigi.set_brightness(0)
                 except Exception:
                     pass
@@ -1198,6 +1201,12 @@ def cmd_monitor(args):
                 print("\n  Reconnecting to display...", end='', flush=True)
                 if wigi.reconnect():
                     print(" OK")
+                    if saved_brightness[0] is not None:
+                        try:
+                            wigi.set_brightness(saved_brightness[0])
+                        except Exception:
+                            pass
+                        saved_brightness[0] = None
                 else:
                     print(" FAILED — retrying in 2s")
                     time.sleep(2)
