@@ -10,7 +10,10 @@
       "Bash(python3:*)",
       "Bash(git init:*)",
       "Bash(git status:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "WebFetch(domain:discord.com)",
+      "Bash(wc:*)",
+      "Bash(git commit:*)"
     ]
   }
 }
