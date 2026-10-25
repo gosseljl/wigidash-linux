@@ -263,9 +263,10 @@ def _find_font(paths, size):
 class SystemMonitor:
     """Renders a graphical system dashboard with panels, arc gauges, and sparklines."""
 
-    def __init__(self):
+    def __init__(self, temp_unit='F'):
         import psutil
         self.psutil = psutil
+        self.temp_unit = temp_unit.upper()
 
         # Fonts — sized for readability on the 5.5" 1024x592 display
         self.font_sm = _find_font(FONT_PATHS, 16)
@@ -340,9 +341,13 @@ class SystemMonitor:
         except Exception:
             pass
 
-        # ── GPU via NVML ctypes (fast, no subprocess) ──
+        # ── GPU via NVML ctypes (fast, no subprocess) or sysfs for AMD ──
+        self._gpu_type = None  # 'nvidia' or 'amd'
         self._nvml = None
         self._nvml_handle = None
+        self._amd_paths = {}
+
+        # Try NVIDIA first
         try:
             nvml = ctypes.CDLL('libnvidia-ml.so.1')
             if nvml.nvmlInit_v2() == 0:
@@ -350,9 +355,55 @@ class SystemMonitor:
                 if nvml.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(handle)) == 0:
                     self._nvml = nvml
                     self._nvml_handle = handle
+                    self._gpu_type = 'nvidia'
                     self._has_gpu = True
         except Exception:
             pass
+
+        # If no NVIDIA, try AMD via sysfs
+        if not self._gpu_type:
+            try:
+                for card in range(4): # Check first 4 cards
+                    base = f'/sys/class/drm/card{card}/device'
+                    vendor_path = f'{base}/vendor'
+                    if os.path.exists(vendor_path):
+                        with open(vendor_path) as f:
+                            vendor = f.read().strip()
+                        if vendor == '0x1002': # AMD
+                            self._gpu_type = 'amd'
+                            self._has_gpu = True
+                            self._amd_paths = {
+                                'util': f'{base}/gpu_busy_percent',
+                                'vram_total': f'{base}/mem_info_vram_total',
+                                'vram_used': f'{base}/mem_info_vram_used'
+                            }
+                            # Find hwmon for temp/power/clock
+                            hwmon_dir = f'{base}/hwmon'
+                            if os.path.exists(hwmon_dir):
+                                for h in os.listdir(hwmon_dir):
+                                    h_path = f'{hwmon_dir}/{h}'
+                                    # Clock (freq1 or freq2 might be sclk)
+                                    for i in range(1, 4):
+                                        lp = f'{h_path}/freq{i}_label'
+                                        if os.path.exists(lp):
+                                            with open(lp) as f:
+                                                if f.read().strip() == 'sclk':
+                                                    self._amd_paths['clock'] = f'{h_path}/freq{i}_input'
+                                    # Temp (temp1 or temp2 might be edge/junction)
+                                    for i in range(1, 4):
+                                        lp = f'{h_path}/temp{i}_label'
+                                        if os.path.exists(lp):
+                                            with open(lp) as f:
+                                                label = f.read().strip()
+                                                if label in ('edge', 'junction') and 'temp' not in self._amd_paths:
+                                                    self._amd_paths['temp'] = f'{h_path}/temp{i}_input'
+                                    # Power
+                                    pp = f'{h_path}/power1_average'
+                                    if os.path.exists(pp):
+                                        self._amd_paths['power'] = pp
+                            break
+            except Exception:
+                pass
 
         # Prime CPU percent
         psutil.cpu_percent(interval=0)
@@ -410,8 +461,10 @@ class SystemMonitor:
         self._mem = psutil.virtual_memory()
         self._swap = psutil.swap_memory()
 
-        if self._nvml and self._nvml_handle:
+        if self._gpu_type == 'nvidia' and self._nvml and self._nvml_handle:
             self._gpu_stats = self._query_gpu_nvml()
+        elif self._gpu_type == 'amd':
+            self._gpu_stats = self._query_gpu_amd()
 
         if self._rapl_path:
             try:
@@ -565,6 +618,43 @@ class SystemMonitor:
                 'power': power.value / 1000,
                 'temp_c': temp.value,
             }
+        except Exception:
+            return None
+
+    def _query_gpu_amd(self):
+        """Query AMD GPU stats via sysfs."""
+        paths = self._amd_paths
+        stats = {
+            'util': 0,
+            'clock': 0,
+            'vram_used': 0.0,
+            'vram_total': 0.0,
+            'power': 0.0,
+            'temp_c': 0,
+        }
+        try:
+            if 'util' in paths:
+                with open(paths['util']) as f:
+                    stats['util'] = int(f.read().strip())
+            if 'clock' in paths:
+                with open(paths['clock']) as f:
+                    # freq file is usually in Hz or MHz*1e6
+                    stats['clock'] = int(f.read().strip()) // 1_000_000
+            if 'vram_used' in paths:
+                with open(paths['vram_used']) as f:
+                    stats['vram_used'] = int(f.read().strip()) / (1024 ** 3)
+            if 'vram_total' in paths:
+                with open(paths['vram_total']) as f:
+                    stats['vram_total'] = int(f.read().strip()) / (1024 ** 3)
+            if 'power' in paths:
+                with open(paths['power']) as f:
+                    # power file is usually in microWatts
+                    stats['power'] = int(f.read().strip()) / 1_000_000
+            if 'temp' in paths:
+                with open(paths['temp']) as f:
+                    # temp file is usually in milliCelsius
+                    stats['temp_c'] = int(f.read().strip()) // 1000
+            return stats
         except Exception:
             return None
 
@@ -783,7 +873,10 @@ class SystemMonitor:
         if self._cached_temps:
             for label, tc in self._cached_temps:
                 if label == 'CPU':
-                    temp_str = f"{tc * 9 / 5 + 32:.0f}\u00b0F"
+                    if self.temp_unit == 'C':
+                        temp_str = f"{tc:.0f}\u00b0C"
+                    else:
+                        temp_str = f"{tc * 9 / 5 + 32:.0f}\u00b0F"
                     break
         self._draw_stat_row(d, sx, sy + 22, sw, "Temp", temp_str)
 
@@ -825,9 +918,13 @@ class SystemMonitor:
                             f"{gpu['vram_used']:.1f}/{gpu['vram_total']:.0f} GB")
         self._draw_stat_row(d, sx, sy + 44, sw, "Power",
                             f"{gpu['power']:.0f} W")
-        tf = gpu['temp_c'] * 9 / 5 + 32
-        self._draw_stat_row(d, sx, sy + 66, sw, "Temp",
-                            f"{tf:.0f}\u00b0F")
+        if self.temp_unit == 'C':
+            self._draw_stat_row(d, sx, sy + 66, sw, "Temp",
+                                f"{gpu['temp_c']:.0f}\u00b0C")
+        else:
+            tf = gpu['temp_c'] * 9 / 5 + 32
+            self._draw_stat_row(d, sx, sy + 66, sw, "Temp",
+                                f"{tf:.0f}\u00b0F")
 
     def _draw_temps_panel(self, d, px, py):
         """Temperatures panel: list of sensor readings (from background thread)."""
@@ -847,7 +944,12 @@ class SystemMonitor:
 
         for i, (label, temp_c) in enumerate(readings[:max_items]):
             ty = sy + i * line_h
-            temp_f = temp_c * 9 / 5 + 32
+            if self.temp_unit == 'C':
+                temp_str = f"{temp_c:.0f}\u00b0C"
+            else:
+                temp_f = temp_c * 9 / 5 + 32
+                temp_str = f"{temp_f:.0f}\u00b0F"
+
             color = (C_GREEN if temp_c < 60
                      else (C_YELLOW if temp_c < 80 else C_RED))
 
@@ -857,7 +959,7 @@ class SystemMonitor:
 
             # Label and value
             d.text((sx + 16, ty), label, fill=C_TEXT, font=self.font_stat)
-            d.text((sx + sw, ty), f"{temp_f:.0f}\u00b0F",
+            d.text((sx + sw, ty), temp_str,
                    fill=color, font=self.font_stat, anchor="ra")
 
     def _draw_memory_panel(self, d, px, py):
@@ -898,7 +1000,7 @@ class SystemMonitor:
         psu = self._psu
         total_w = psu.get('power_total', 0)
         cpu_w = self._cpu_power_w
-        gpu_w = self._gpu_stats['power'] if self._gpu_stats else 0
+        gpu_w = self._gpu_stats['power'] if self._gpu_stats and 'power' in self._gpu_stats else 0
 
         # Header line: "Power" left, total watts right
         d.text((sx, sy), "Power", fill=C_DIM, font=self.font_stat)
@@ -1139,7 +1241,7 @@ def cmd_monitor(args):
         print("Error: WigiDash not found!")
         sys.exit(1)
 
-    monitor = SystemMonitor()
+    monitor = SystemMonitor(temp_unit=args.unit)
     interval = args.interval
     running = True
     suspended = threading.Event()
@@ -1279,6 +1381,8 @@ def main():
     p_mon = sub.add_parser('monitor', help='Live system monitor dashboard')
     p_mon.add_argument('--interval', type=float, default=0.5,
                        help='Update interval in seconds (default: 0.5)')
+    p_mon.add_argument('--unit', choices=['C', 'F'], default='F',
+                       help='Temperature unit: C (Celsius) or F (Fahrenheit) (default: F)')
     p_mon.set_defaults(func=cmd_monitor)
 
     # color
